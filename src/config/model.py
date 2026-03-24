@@ -6,25 +6,20 @@ from langchain_openai.embeddings import OpenAIEmbeddings
 model = ChatOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key="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",
-    model="minimax/minimax-m2.5",
+    model="xiaomi/mimo-v2-pro",
     # model="google/gemini-2.5-flash",
     # google/gemini-3-pro-preview
     # google/gemini-2.5-flash
-
     # model="kwaipilot/kat-coder-pro:free",
-    temperature=0.7
+    temperature=0.1,
 )
-
 embeddings = OpenAIEmbeddings(
     # 1. Меняем базовый URL на OpenRouter
     openai_api_base="https://openrouter.ai/api/v1",
-
     # 2. Передаем ключ OpenRouter
     openai_api_key="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",
-
     # 3. Указываем модель (OpenRouter требует указывать провайдера, например 'openai/')
     model="openai/text-embedding-3-small",
-
     # Опционально: отключаем проверку SSL, если возникают странные ошибки сети
     # check_embeddings=True
 )

@@ -1,0 +1,7 @@
+.venv/
+.idea/
+.chainlit/
+DataFrames/
+compute_tool_storage/
+__pycache__/
+*.py[cod]

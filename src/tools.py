@@ -1,10 +1,3 @@
-""" Инструменты (tools) для суб-агентов.
-Содержит:
-- Создание sandbox и MCP-инструментов (code_tool, graph_tool)
-- Хелперы для загрузки/извлечения DataFrame из sandbox
-- Инструменты для работы с DataFrame (отображение, статистика, смена)
-"""
-
 import os
 import sys
 import asyncio
@@ -16,19 +9,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pydantic import BaseModel, Field
 from langchain.tools import tool
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from sandbox import ClientPythonSandbox
 from executor import BaseCodeExecutorTool
 
+try:
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+except ImportError:
+    MultiServerMCPClient = None
 
 # ━━━━━━━━━━━━━━━━━━━ КОНСТАНТЫ ━━━━━━━━━━━━━━━━━━━
 
 DATAFRAMES_DIR: str = "DataFrames"
-"""Директория для хранения всех pickle-файлов с DataFrame."""
-
 TOOL_INVOKE_SUCCESS_FOR_AGENT: str = "Операция выполнена успешно"
-"""Сообщение, возвращаемое инструментом при успешном выполнении."""
-
 
 # ━━━━━━━━━━━━━━━━━━━ SANDBOX ━━━━━━━━━━━━━━━━━━━
 
@@ -42,23 +34,14 @@ main_react_agent_sandbox = ClientPythonSandbox(
         "pio": pio,
     },
 )
-"""Глобальный экземпляр песочницы, используемый code_tool и graph_tool."""
-
 
 # ━━━━━━━━━━━━━━━ ХЕЛПЕРЫ SANDBOX ↔ DATAFRAME ━━━━━━━━━━━━━━━
+
 
 def load_dataframe_to_sandbox(
     sandbox: ClientPythonSandbox,
     df: Optional[pd.DataFrame] = None,
 ) -> None:
-    """Загружает DataFrame в sandbox как переменную ``df``.
-
-    Если ``df`` не передан, загружает ``current_dataframe.pkl`` из ``DATAFRAMES_DIR``.
-
-    Args:
-        sandbox: Экземпляр песочницы.
-        df: DataFrame для загрузки. Если None — читает из файла.
-    """
     if df is not None:
         sandbox.add_variable("df", df.copy())
     else:
@@ -71,18 +54,6 @@ def load_dataframe_to_sandbox(
 def get_dataframe_from_sandbox(
     sandbox: ClientPythonSandbox,
 ) -> Optional[pd.DataFrame]:
-    """Извлекает последний DataFrame-результат из sandbox.
-
-    Сначала проверяет ``sandbox.last_dataframe_variable`` — имя переменной,
-    в которую BaseCodeExecutorTool сохранил последний DataFrame.
-    Если не найден — fallback на ``df``.
-
-    Args:
-        sandbox: Экземпляр песочницы.
-
-    Returns:
-        Копия DataFrame или None, если не найден.
-    """
     target = sandbox.last_dataframe_variable
     if target:
         val = sandbox.get_variable(target)
@@ -90,74 +61,116 @@ def get_dataframe_from_sandbox(
             return val.copy()
 
     # Fallback: код мог модифицировать df напрямую
+
     df_val = sandbox.get_variable("df")
     if isinstance(df_val, pd.DataFrame):
         return df_val.copy()
-
     return None
+
+
+def _safe_dataframe_preview(df: pd.DataFrame, rows: int) -> str:
+    preview_df = df.head(rows)
+    try:
+        return preview_df.to_xml()
+    except Exception:
+        try:
+            return preview_df.to_json()
+        except Exception as exc:
+            return f"Не удалось сериализовать DataFrame: {exc}"
 
 
 # ━━━━━━━━━━━━━━━━━━━ MCP ИНСТРУМЕНТЫ ━━━━━━━━━━━━━━━━━━━
 
-def get_python_code_mcp_tools() -> list:
-    """Подключается к MCP-серверу генерации Python-кода и возвращает инструменты.
 
-    Returns:
-        Список MCP-инструментов с порта 8201.
-    """
-    mcp_client = MultiServerMCPClient({
-        "code_generator": {
-            "transport": "streamable_http",
-            "url": "http://127.0.0.1:8201/mcp",
+def get_python_code_mcp_tools() -> list:
+    if MultiServerMCPClient is None:
+        return []
+    mcp_client = MultiServerMCPClient(
+        {
+            "code_generator": {
+                "transport": "streamable_http",
+                "url": "http://127.0.0.1:8201/mcp",
+            }
         }
-    })
+    )
     return asyncio.run(mcp_client.get_tools())
 
 
 def get_plotly_code_mcp_tools() -> list:
-    """Подключается к MCP-серверу генерации Plotly-кода и возвращает инструменты.
-
-    Returns:
-        Список MCP-инструментов с порта 8202.
-    """
-    mcp_client = MultiServerMCPClient({
-        "code_generator": {
-            "transport": "streamable_http",
-            "url": "http://127.0.0.1:8202/mcp",
+    if MultiServerMCPClient is None:
+        return []
+    mcp_client = MultiServerMCPClient(
+        {
+            "code_generator": {
+                "transport": "streamable_http",
+                "url": "http://127.0.0.1:8202/mcp",
+            }
         }
-    })
+    )
     return asyncio.run(mcp_client.get_tools())
 
 
-python_code_mcp_tools = get_python_code_mcp_tools()
-python_plotly_mcp_tools = get_plotly_code_mcp_tools()
+def _safe_load_mcp_tools(loader, label: str) -> list:
+    try:
+        return loader()
+    except Exception as exc:
+        print(f"[tools] Failed to load {label} MCP tools: {exc}")
+        return []
 
+
+def _make_unavailable_tool(name: str, description: str):
+
+    def _tool(task: str = "", target_variable: str = "result") -> str:
+        del task, target_variable
+        return (
+            f"MCP tool '{name}' is unavailable. "
+            f"Start the corresponding MCP server or install missing adapters."
+        )
+
+    _tool.__name__ = name
+    _tool.__doc__ = description
+    return tool(name)(_tool)
+
+
+python_code_mcp_tools = _safe_load_mcp_tools(get_python_code_mcp_tools, "python")
+python_plotly_mcp_tools = _safe_load_mcp_tools(get_plotly_code_mcp_tools, "plotly")
 mcp_generate_code_tool = next(
     (t for t in python_code_mcp_tools if t.name == "generate_python_code"),
     None,
 )
-
 mcp_generate_plotly_tool = next(
     (t for t in python_plotly_mcp_tools if t.name == "generate_plotly_python_code"),
     None,
 )
-
-code_tool = BaseCodeExecutorTool(
-    mcp_tool=mcp_generate_code_tool,
-    sandbox=main_react_agent_sandbox,
-    name=mcp_generate_code_tool.name,
-    description=mcp_generate_code_tool.description,
-)
-
-graph_tool = BaseCodeExecutorTool(
-    mcp_tool=mcp_generate_plotly_tool,
-    sandbox=main_react_agent_sandbox,
-    name=mcp_generate_plotly_tool.name,
-    description=mcp_generate_plotly_tool.description,
-)
-
+if mcp_generate_code_tool is not None:
+    print("mcp_generate_code_tool")
+    code_tool = BaseCodeExecutorTool(
+        mcp_tool=mcp_generate_code_tool,
+        sandbox=main_react_agent_sandbox,
+        name=mcp_generate_code_tool.name,
+        description=mcp_generate_code_tool.description,
+    )
+else:
+    code_tool = _make_unavailable_tool(
+        "generate_python_code",
+        "Fallback tool returned when the Python MCP code generator is unavailable.",
+    )
+if mcp_generate_plotly_tool is not None:
+    print("mcp_generate_plotly_tool")
+    graph_tool = BaseCodeExecutorTool(
+        mcp_tool=mcp_generate_plotly_tool,
+        sandbox=main_react_agent_sandbox,
+        name=mcp_generate_plotly_tool.name,
+        description=mcp_generate_plotly_tool.description,
+    )
+else:
+    graph_tool = _make_unavailable_tool(
+        "generate_plotly_python_code",
+        "Fallback tool returned when the Plotly MCP code generator is unavailable.",
+    )
 
 # ━━━━━━━━━━━━━━━━━━━ ИНСТРУМЕНТЫ-ФУНКЦИИ ━━━━━━━━━━━━━━━━━━━
+
 
 @tool("display_data_frame")
 def display_data_frame(path_to_dataframe: str) -> str:
@@ -173,11 +186,10 @@ def display_data_frame(path_to_dataframe: str) -> str:
         XML-представление первых 5 строк DataFrame или сообщение об ошибке.
     """
     # Ограничиваем доступ только к DATAFRAMES_DIR
-    safe_path = os.path.join(DATAFRAMES_DIR, os.path.basename(path_to_dataframe))
 
+    safe_path = os.path.join(DATAFRAMES_DIR, os.path.basename(path_to_dataframe))
     if not os.path.exists(safe_path):
         return f"Файл '{path_to_dataframe}' не найден в {DATAFRAMES_DIR}"
-
     try:
         if safe_path.endswith(".pkl"):
             df = pd.read_pickle(safe_path)
@@ -187,8 +199,7 @@ def display_data_frame(path_to_dataframe: str) -> str:
             df = pd.read_csv(safe_path)
         else:
             df = pd.read_pickle(safe_path)
-
-        return df.head(5).to_xml()
+        return _safe_dataframe_preview(df, rows=5)
     except Exception as e:
         return f"Не удалось загрузить файл: {e}"
 
@@ -208,30 +219,24 @@ def calculate_base_statictics_for_column(column_name: str) -> str:
         Строковое представление словаря со статистиками или сообщение об ошибке.
     """
     path = os.path.join(DATAFRAMES_DIR, "current_dataframe.pkl")
-
     if not os.path.exists(path):
         return f"Файл {path} не найден"
-
     current_dataframe = pd.read_pickle(path)
-
     if column_name not in current_dataframe.columns:
         return (
             f"Столбец '{column_name}' отсутствует в DataFrame. "
             f"Доступные столбцы: {list(current_dataframe.columns)}"
         )
-
     if not pd.api.types.is_numeric_dtype(current_dataframe[column_name]):
         return (
             f"Столбец '{column_name}' не содержит числовых значений "
             f"(тип: {current_dataframe[column_name].dtype})"
         )
-
     stats = current_dataframe[column_name].describe().to_dict()
     stats["range"] = stats["max"] - stats["min"]
     stats["skewness"] = float(current_dataframe[column_name].skew())
     stats["kurtosis"] = float(current_dataframe[column_name].kurtosis())
     stats["std_error"] = float(current_dataframe[column_name].sem())
-
     return str(stats)
 
 
@@ -244,18 +249,14 @@ def get_available_dataframes() -> str:
     """
     if not os.path.exists(DATAFRAMES_DIR):
         return f"Директория {DATAFRAMES_DIR} не найдена"
-
     files = os.listdir(DATAFRAMES_DIR)
     pkl_files = [f for f in files if f.endswith(".pkl")]
-
     if not pkl_files:
         return "Нет доступных DataFrame"
-
     return "\n".join(pkl_files)
 
 
 class ChangeCurrentDataframeParams(BaseModel):
-    """Схема аргументов инструмента ``change_current_dataframe``."""
     new_dataframe_name: str = Field(
         description=(
             "Название DataFrame, который должен стать текущим, "
@@ -277,14 +278,11 @@ def change_current_dataframe(new_dataframe_name: str) -> str:
         Сообщение об успехе или ошибке.
     """
     new_path = os.path.join(DATAFRAMES_DIR, new_dataframe_name)
-
     if not os.path.exists(new_path):
         return f"Файл '{new_dataframe_name}' не найден в {DATAFRAMES_DIR}"
-
     new_df = pd.read_pickle(new_path)
     current_path = os.path.join(DATAFRAMES_DIR, "current_dataframe.pkl")
     new_df.to_pickle(current_path)
-
     return TOOL_INVOKE_SUCCESS_FOR_AGENT
 
 
@@ -298,13 +296,10 @@ def show_current_uses_dataframe() -> str:
         Строка с информацией о DataFrame или сообщение об ошибке.
     """
     path = os.path.join(DATAFRAMES_DIR, "current_dataframe.pkl")
-
     if not os.path.exists(path):
         return "Текущий DataFrame не найден"
-
     current_df = pd.read_pickle(path)
-    dataframe_xml = current_df.head(2).to_xml()
-
+    dataframe_xml = _safe_dataframe_preview(current_df, rows=2)
     return (
         f"Текущий DataFrame ({current_df.shape[0]} строк, "
         f"{current_df.shape[1]} столбцов):\n"
